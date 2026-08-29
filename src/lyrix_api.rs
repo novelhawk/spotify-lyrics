@@ -33,7 +33,7 @@ pub struct LyrixResponse {
     pub colors: Colors,
 }
 
-const BASE_URL: &str = "https://lyrix.io";
+const BASE_URL: &str = "https://lyrix.vercel.app";
 
 pub async fn get_lyrics(track_id: &str) -> Result<LyrixResponse> {
     let client = reqwest::Client::new();

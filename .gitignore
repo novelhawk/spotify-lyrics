@@ -1,2 +1,4 @@
-schema/
-
+/target
+.env
+.env.*
+!.env.example
