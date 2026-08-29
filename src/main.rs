@@ -1,8 +1,6 @@
 use std::{sync::Arc, time::Duration};
 
-use application::{
-    Alert, ApplicationEvent, ApplicationStatus, PlaybackStatus, Song,
-};
+use application::{Alert, ApplicationEvent, ApplicationStatus, PlaybackStatus, Song};
 use color_eyre::eyre::{Context, ContextCompat, Result};
 use discord_api::get_spotify_token;
 use lyrics_providers::{LyricsManager, TrackQuery};
@@ -73,7 +71,7 @@ async fn console_render(state_rx: watch::Receiver<ApplicationStatus>) -> Result<
                 let area = frame.area();
                 let mut text = vec![];
 
-                let mut foreground = Color::Rgb(255, 255, 255);
+                let mut foreground = Color::Rgb(200, 200, 200);
                 let mut highlight = Color::Rgb(255, 255, 255);
                 let mut background = Color::Rgb(0, 0, 0);
                 if let Some(colors) = &status.colors {
@@ -115,8 +113,8 @@ async fn console_render(state_rx: watch::Receiver<ApplicationStatus>) -> Result<
                                 })
                                 .collect::<Vec<_>>()
                         })
-                        .skip(index.checked_sub(1).unwrap_or(0))
-                        .take(3)
+                        .skip(index.checked_sub(3).unwrap_or(0))
+                        .take(7)
                         .collect();
 
                     text.push(vec![Span::default().content(format!(
@@ -136,8 +134,7 @@ async fn console_render(state_rx: watch::Receiver<ApplicationStatus>) -> Result<
 
                 frame.render_widget(Block::new().bg(background), area);
                 frame.render_widget(
-                    Paragraph::new(text.into_iter().map(Line::from).collect::<Vec<_>>())
-                        .centered(),
+                    Paragraph::new(text.into_iter().map(Line::from).collect::<Vec<_>>()).centered(),
                     areas[1],
                 );
 
