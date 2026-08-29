@@ -9,7 +9,7 @@ use crate::lyrics_providers::{LyricsError, LyricsProvider, LyricsResult, TrackQu
 
 pub const DEFAULT_LRCLIB_BASE_URL: &str = "https://lrclib.net";
 pub const DEFAULT_LRCLIB_USER_AGENT: &str =
-    "spotify-lyrics/0.1.0 (https://github.com/spotify-lyrics)";
+    "spotify-lyrics/0.1.0 (https://github.com/novelhawk/spotify-lyrics)";
 
 #[derive(Deserialize, Debug)]
 pub struct LrclibRecord {
