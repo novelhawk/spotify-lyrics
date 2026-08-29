@@ -1,27 +1,15 @@
-use std::{
-    collections::HashMap,
-    ops::{Div, Rem},
-    time::Duration,
-};
+use std::{sync::Arc, time::Duration};
 
 use application::{
-    ApplicationEvent, ApplicationStatus, Colors, LyricsLine, LyricsSegment, PlaybackStatus, Song,
-    RGB,
+    Alert, ApplicationEvent, ApplicationStatus, PlaybackStatus, Song,
 };
 use color_eyre::eyre::{Context, ContextCompat, Result};
 use discord_api::get_spotify_token;
-use lyrix_api::{get_lyrics, LyrixLyrics};
-use opentelemetry::{
-    global::{self, tracer_provider},
-    trace::{Tracer, TracerProvider as _},
-};
-use opentelemetry_otlp::WithExportConfig;
-use opentelemetry_sdk::trace::TracerProvider;
-use opentelemetry_semantic_conventions::resource::SERVICE_NAME;
+use lyrics_providers::{LyricsManager, TrackQuery};
 use ratatui::{
     crossterm::event::{self, Event, KeyCode, KeyEventKind},
     layout::{Constraint, Flex, Layout},
-    style::{Color, Stylize},
+    style::{Color, Style, Stylize},
     text::{Line, Span},
     widgets::{Block, Paragraph},
 };
@@ -29,46 +17,16 @@ use spotify_api::{
     models::spotify_message::SpotifyMessage,
     spotify_api::{connect, subscribe_player},
 };
-use tokio::sync::{
-    mpsc::{self},
-    watch::{self},
-};
-use tracing::info;
+use tokio::sync::{mpsc, watch};
 use utils::time::print_hhmm;
 
 pub mod application;
 pub mod discord_api;
 pub mod lyrics_context;
+pub mod lyrics_providers;
 pub mod lyrix_api;
 pub mod spotify_api;
 pub mod utils;
-
-// fn init_opentelemetry() {
-//     let tracer_provider = opentelemetry_otlp::new_pipeline()
-//         .tracing()
-//         .with_exporter(
-//             opentelemetry_otlp::new_exporter()
-//                 .tonic()
-//                 .with_endpoint("http://localhost:4317")
-//                 .with_timeout(Duration::from_secs(3)),
-//         )
-//         .install_batch(opentelemetry_sdk::runtime::Tokio)
-//         .wrap_err("Failed to install OpenTelemetry tracing pipeline")?;
-//
-//     global::set_tracer_provider(tracer_provider);
-//
-//     let tracer = global::tracer("spotify_lyrics_tracer");
-//
-//     {
-//         let _span = tracer.start("test");
-//         info!("Test");
-//     }
-//
-// info!("Test");
-
-// global::shutdown_tracer_provider();
-
-// }
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -87,9 +45,17 @@ async fn main() -> Result<()> {
 
     let (state_tx, state_rx) = watch::channel(ApplicationStatus::default());
 
-    let (tx, rx) = mpsc::channel::<ApplicationEvent>(5);
-    tokio::spawn(connect(spotify_access_token.clone(), tx));
-    tokio::spawn(application_loop(spotify_access_token.clone(), rx, state_tx));
+    let (tx, rx) = mpsc::channel::<ApplicationEvent>(32);
+    let lyrics_manager = Arc::new(LyricsManager::from_env());
+
+    tokio::spawn(connect(spotify_access_token.clone(), tx.clone()));
+    tokio::spawn(application_loop(
+        spotify_access_token.clone(),
+        rx,
+        tx.clone(),
+        state_tx,
+        lyrics_manager,
+    ));
 
     console_render(state_rx).await?;
 
@@ -104,6 +70,7 @@ async fn console_render(state_rx: watch::Receiver<ApplicationStatus>) -> Result<
 
         terminal
             .draw(|frame| {
+                let area = frame.area();
                 let mut text = vec![];
 
                 let mut foreground = Color::Rgb(255, 255, 255);
@@ -165,14 +132,55 @@ async fn console_render(state_rx: watch::Receiver<ApplicationStatus>) -> Result<
                     Constraint::Fill(1),
                 ])
                 .flex(Flex::Center)
-                .split(frame.area());
+                .split(area);
 
-                frame.render_widget(Block::new().bg(background), frame.area());
+                frame.render_widget(Block::new().bg(background), area);
                 frame.render_widget(
-                    Paragraph::new(text.into_iter().map(|l| Line::from(l)).collect::<Vec<_>>())
+                    Paragraph::new(text.into_iter().map(Line::from).collect::<Vec<_>>())
                         .centered(),
                     areas[1],
-                )
+                );
+
+                // Render alert banner if active and not expired
+                if let Some(alert) = &status.alert {
+                    if !alert.is_expired() {
+                        let alert_msg = &alert.message;
+                        let max_w = area.width.saturating_sub(4).max(10);
+                        let box_w = ((alert_msg.len() as u16 + 6).min(max_w)).max(28);
+                        let box_h = 3u16;
+
+                        let v_chunks = Layout::vertical([
+                            Constraint::Length(1),
+                            Constraint::Length(box_h),
+                            Constraint::Min(0),
+                        ])
+                        .split(area);
+
+                        let h_chunks = Layout::horizontal([
+                            Constraint::Fill(1),
+                            Constraint::Length(box_w),
+                            Constraint::Fill(1),
+                        ])
+                        .split(v_chunks[1]);
+
+                        let alert_block = Block::bordered()
+                            .border_style(Style::default().fg(Color::Yellow))
+                            .bg(Color::Rgb(25, 20, 20))
+                            .title(Span::styled(
+                                " ⚠ Alert ",
+                                Style::default().fg(Color::Yellow).bold(),
+                            ));
+
+                        let alert_p = Paragraph::new(Line::from(vec![Span::styled(
+                            alert_msg,
+                            Style::default().fg(Color::White).bold(),
+                        )]))
+                        .block(alert_block)
+                        .centered();
+
+                        frame.render_widget(alert_p, h_chunks[1]);
+                    }
+                }
             })
             .wrap_err("Failed to draw to terminal")?;
 
@@ -192,10 +200,18 @@ async fn console_render(state_rx: watch::Receiver<ApplicationStatus>) -> Result<
 async fn application_loop(
     spotify_token: String,
     mut rx: mpsc::Receiver<ApplicationEvent>,
+    event_tx: mpsc::Sender<ApplicationEvent>,
     state_tx: watch::Sender<ApplicationStatus>,
+    lyrics_manager: Arc<LyricsManager>,
 ) -> Result<()> {
     let mut cloned = ApplicationStatus::default();
     let mut last_track = String::new();
+    let alert_duration = Duration::from_secs(
+        std::env::var("ALERT_DURATION_SECS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(5),
+    );
 
     while let Some(event) = rx.recv().await {
         match event {
@@ -219,22 +235,34 @@ async fn application_loop(
                     });
 
                     cloned.song = Some(Song {
-                        spotify_track_id: None,
-                        author: event.artist,
-                        name: event.song,
+                        spotify_track_id: Some(event.spotify_track_id.clone()),
+                        author: event.artist.clone(),
+                        name: event.song.clone(),
                     });
 
                     if last_track != event.spotify_track_id {
                         last_track = event.spotify_track_id.clone();
                         cloned.lyrics = vec![];
-                        if let Ok(lyrics) = get_lyrics(&event.spotify_track_id).await {
-                            cloned.lyrics = flatten_lyrics(lyrics.lyrics);
-                            cloned.colors = Some(Colors {
-                                background: parse_color(lyrics.colors.background),
-                                text: parse_color(lyrics.colors.text),
-                                highlight: parse_color(lyrics.colors.highlight_text),
-                            });
-                        }
+                        cloned.colors = None;
+                        cloned.alert = None; // Reset alert on track change
+
+                        let manager = lyrics_manager.clone();
+                        let tx = event_tx.clone();
+                        let track_id = event.spotify_track_id.clone();
+                        let query = TrackQuery {
+                            track_id: Some(track_id.clone()),
+                            track_name: event.song.clone(),
+                            artist_name: event.artist.clone(),
+                            duration: Some(event.duration),
+                        };
+
+                        // Async, non-blocking lyrics fetching across providers
+                        tokio::spawn(async move {
+                            let result = manager.fetch_lyrics(&query).await;
+                            let _ = tx
+                                .send(ApplicationEvent::LyricsFetched { track_id, result })
+                                .await;
+                        });
                     }
 
                     state_tx
@@ -242,32 +270,28 @@ async fn application_loop(
                         .wrap_err("Failed to update application state")?;
                 }
             },
+            ApplicationEvent::LyricsFetched { track_id, result } => {
+                // Ensure the result corresponds to the currently active track
+                if track_id == last_track {
+                    match result {
+                        Ok(lyrics_res) => {
+                            cloned.lyrics = lyrics_res.lyrics;
+                            cloned.colors = lyrics_res.colors;
+                            cloned.alert = None;
+                        }
+                        Err(err) => {
+                            cloned.lyrics = vec![];
+                            cloned.alert = Some(Alert::new(err.user_message(), alert_duration));
+                        }
+                    }
+
+                    state_tx
+                        .send(cloned.clone())
+                        .wrap_err("Failed to update application state with lyrics")?;
+                }
+            }
         }
     }
 
     Ok(())
-}
-
-fn parse_color(color: i64) -> RGB {
-    let hex = 16777216 + color;
-
-    RGB(
-        hex.div(256 * 256) as u8,
-        hex.div(256).rem(256) as u8,
-        hex.rem(256) as u8,
-    )
-}
-
-fn flatten_lyrics(lyrics: LyrixLyrics) -> Vec<LyricsLine> {
-    lyrics
-        .lines
-        .into_iter()
-        .map(|line| LyricsLine {
-            start: line.start_time,
-            segments: vec![LyricsSegment {
-                start: line.start_time,
-                text: line.words,
-            }],
-        })
-        .collect()
 }

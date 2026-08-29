@@ -1,8 +1,9 @@
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
 
-use crate::{spotify_api::models::spotify_message::SpotifyMessage, utils::time::print_hhmm};
+use crate::lyrics_providers::{LyricsError, LyricsResult};
+use crate::spotify_api::models::spotify_message::SpotifyMessage;
 
 #[derive(Clone, Debug)]
 pub struct PlaybackStatus {
@@ -55,16 +56,53 @@ pub struct Colors {
     pub highlight: RGB,
 }
 
+#[derive(Clone, Debug)]
+pub struct Alert {
+    pub message: String,
+    pub created_at: Instant,
+    pub duration: Duration,
+}
+
+impl Alert {
+    pub fn new(message: impl Into<String>, duration: Duration) -> Self {
+        Self {
+            message: message.into(),
+            created_at: Instant::now(),
+            duration,
+        }
+    }
+
+    pub fn is_expired(&self) -> bool {
+        self.created_at.elapsed() >= self.duration
+    }
+}
+
 #[derive(Default, Clone, Debug)]
 pub struct ApplicationStatus {
     pub playback: Option<PlaybackStatus>,
     pub song: Option<Song>,
     pub lyrics: Vec<LyricsLine>,
     pub colors: Option<Colors>,
+    pub alert: Option<Alert>,
 }
 
 pub enum ApplicationEvent {
     Spotify(SpotifyMessage),
+    LyricsFetched {
+        track_id: String,
+        result: Result<LyricsResult, LyricsError>,
+    },
 }
 
-async fn event_listener() {}
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_alert_expiration() {
+        let alert = Alert::new("Test message", Duration::from_millis(50));
+        assert!(!alert.is_expired());
+        std::thread::sleep(Duration::from_millis(60));
+        assert!(alert.is_expired());
+    }
+}

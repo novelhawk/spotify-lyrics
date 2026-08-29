@@ -32,6 +32,7 @@ pub struct PlayerStateChangedState {
     pub is_playing: bool,
 }
 
+#[allow(dead_code)]
 #[derive(Deserialize)]
 struct Event {
     source: String,
@@ -41,6 +42,7 @@ struct Event {
     event: Value,
 }
 
+#[allow(dead_code)]
 #[derive(Deserialize)]
 struct Payload {
     events: Vec<Event>,

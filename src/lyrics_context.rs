@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 
-use crate::lyrix_api::{Colors, LyrixLine};
+use crate::lyrics_providers::lyrix::{LyrixColors as Colors, LyrixLine};
 
 pub struct LyricsContext {
     pub colors: Colors,
